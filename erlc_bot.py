@@ -3,6 +3,7 @@ import discord
 import asyncio
 import time
 import os
+from aiohttp import web # New: Import aiohttp for the web server
 
 # --- CONFIGURATION ---
 DISCORD_BOT_TOKEN = os.environ['DISCORD_BOT_TOKEN']
@@ -17,6 +18,18 @@ FOOTER_IMAGE_URL = "https://media.discordapp.net/attachments/1377899647993122842
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
+
+# New: The web server to keep the port open
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 8080)))
+    await site.start()
 
 class JoinButtonView(discord.ui.View):
     def __init__(self, url):
@@ -110,9 +123,11 @@ async def update_status_loop():
             banner_msg = None
             status_msg = None
             await asyncio.sleep(60)
+
 @client.event
 async def on_ready():
     print(f"Bot is logged in as {client.user}")
     client.loop.create_task(update_status_loop())
+    client.loop.create_task(start_web_server()) # New: Start the web server
 
 client.run(DISCORD_BOT_TOKEN)
