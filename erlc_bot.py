@@ -3,43 +3,35 @@ import discord
 import asyncio
 import time
 import os
-from aiohttp import web # Import aiohttp for the web server
-import datetime # Used for adding timestamps to status updates
+from aiohttp import web
+import datetime
+from discord.ext import commands
+from discord import app_commands
 
 # --- CONFIGURATION ---
 DISCORD_BOT_TOKEN = os.environ['DISCORD_BOT_TOKEN']
 DISCORD_CHANNEL_ID = int(os.environ['DISCORD_CHANNEL_ID'])
 ERLC_API_KEY = os.environ['ERLC_API_KEY']
-JOIN_SERVER_URL = "https://policeroleplay.community/join/NSRPLive" # <-- IMPORTANT: Put your button link here
+JOIN_SERVER_URL = "https://policeroleplay.community/join/NSRPLive"
 
 # --- URLs for your images --
 SESSIONS_BANNER_URL = "https://media.discordapp.net/attachments/1377899647993122842/1403170076307492985/image.png"
 FOOTER_IMAGE_URL = "https://media.discordapp.net/attachments/1377899647993122842/1397599002991530157/NSRP_Line_ending-Photoroom.png"
 # ----------------------------------------------------
 
-# Enable message_content intent for the bot to read message content
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-# The web server to keep the port open (required for Render's free Web Service)
 async def handle(request):
-    """
-    Handles incoming web requests to keep the Render service alive.
-    Returns a simple text response.
-    """
     return web.Response(text="Bot is running!")
 
 async def start_web_server():
-    """
-    Starts a small aiohttp web server to listen on the assigned port.
-    This is necessary for Render's free Web Service tier to keep the bot alive.
-    """
     app = web.Application()
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Get the port from Render's environment variable, default to 8080 if not found
     port = int(os.environ.get('PORT', 8080))
     print(f"Attempting to start web server on 0.0.0.0:{port}")
     site = web.TCPSite(runner, '0.0.0.0', port)
@@ -47,17 +39,11 @@ async def start_web_server():
     print(f"Web server started successfully on port {port}")
 
 class JoinButtonView(discord.ui.View):
-    """
-    A Discord UI View containing a persistent button to join the server.
-    """
     def __init__(self, url):
-        super().__init__(timeout=None) # Timeout=None makes the button persistent
+        super().__init__(timeout=None)
         self.add_item(discord.ui.Button(label="Join Server", style=discord.ButtonStyle.link, url=url))
 
 def get_data(endpoint):
-    """
-    Synchronously fetches data from the ERLC API.
-    """
     url = f"https://api.policeroleplay.community/v1/server/{endpoint}"
     headers = {"server-key": ERLC_API_KEY}
     try:
@@ -69,14 +55,9 @@ def get_data(endpoint):
     return None
 
 def build_embeds():
-    """
-    Builds the Discord embeds for the session banner and server status.
-    """
-    # --- Embed 1: The Banner ---
     banner_embed = discord.Embed(color=discord.Color.from_rgb(237, 29, 36))
     banner_embed.set_image(url=SESSIONS_BANNER_URL)
 
-    # --- Embed 2: The Status ---
     players = get_data("players") or []
     queue = get_data("queue") or []
     staff = get_data("staff") or {}
@@ -104,11 +85,8 @@ def build_embeds():
     return banner_embed, status_embed
 
 async def update_status_loop():
-    """
-    Background task to periodically update the server status message in Discord.
-    """
-    await client.wait_until_ready()
-    channel = client.get_channel(DISCORD_CHANNEL_ID)
+    await bot.wait_until_ready()
+    channel = bot.get_channel(DISCORD_CHANNEL_ID)
     if not channel:
         print(f"ERROR: Could not find channel with ID {DISCORD_CHANNEL_ID}.")
         return
@@ -117,69 +95,220 @@ async def update_status_loop():
     status_msg = None
     view = JoinButtonView(url=JOIN_SERVER_URL)
 
-    # Try to find previous messages to edit
-    async for message in channel.history(limit=10): # Limit history search to reduce API calls
-        if message.author == client.user:
-            # The top message will have an embed with an image but no fields
+    async for message in channel.history(limit=10):
+        if message.author == bot.user:
             if message.embeds and not message.embeds[0].fields:
                 banner_msg = message
-            # The bottom message will have fields
             elif message.embeds and message.embeds[0].fields:
                 status_msg = message
         if banner_msg and status_msg:
             break
 
-    while not client.is_closed():
+    while not bot.is_closed():
         try:
-            print("Bot loop: Attempting to build embeds...")
+            print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Bot loop: Heartbeat - Running update cycle.") # NEW: Heartbeat log
             new_banner_embed, new_status_embed = build_embeds()
-            print("Bot loop: Embeds built. Attempting to send/edit message...")
-
-            # If the banner doesn't exist, send it ONCE and then leave it alone.
+            
             if banner_msg is None:
                 banner_msg = await channel.send(embed=new_banner_embed)
-
-            # Always edit the status message. If it doesn't exist, send it first.
             if status_msg is None:
                 status_msg = await channel.send(embed=new_status_embed, view=view)
             else:
                 await status_msg.edit(embed=new_status_embed, view=view)
             
-            print("Bot loop: Message sent/edited successfully.")
-            await asyncio.sleep(60) # Update every 60 seconds
+            await asyncio.sleep(60)
         except Exception as e:
-            print(f"CRITICAL ERROR IN UPDATE LOOP: {e}")
-            # Reset on error so it can try to find/resend the messages
+            print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] CRITICAL ERROR IN UPDATE LOOP: {e}")
             banner_msg = None
             status_msg = None
-            await asyncio.sleep(60) # Wait before retrying
+            await asyncio.sleep(60)
 
-@client.event
+@bot.event
 async def on_ready():
-    """
-    Event handler for when the bot successfully connects to Discord.
-    Starts background tasks.
-    """
-    print(f"Bot is logged in as {client.user}")
-    client.loop.create_task(update_status_loop())
-    client.loop.create_task(start_web_server()) # Start the web server
+    print(f"Bot is logged in as {bot.user}")
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} slash command(s).")
+    except Exception as e:
+        print(f"Failed to sync slash commands: {e}")
 
-@client.event
-async def on_message(message: discord.Message):
-    """
-    Event handler for when a message is sent in a Discord channel.
-    Handles bot commands.
-    """
-    # Ignore messages from the bot itself
-    if message.author == client.user:
+    bot.loop.create_task(update_status_loop())
+    bot.loop.create_task(start_web_server())
+
+@bot.tree.command(name="hello", description="Says hello to the user!")
+async def hello_command(interaction: discord.Interaction):
+    await interaction.response.send_message(f"Hello, {interaction.user.mention}!", ephemeral=True)
+
+@bot.tree.command(name="embed", description="Sends a custom embed message.")
+@app_commands.describe(
+    title="The title of the embed",
+    description="The main text of the embed",
+    color="Hex color code for the embed (e.g., #FF0000 for red)"
+)
+async def embed_command(
+    interaction: discord.Interaction,
+    title: str,
+    description: str,
+    color: str = "#3498DB"
+):
+    try:
+        embed_color = int(color.lstrip('#'), 16)
+    except ValueError:
+        await interaction.response.send_message("Invalid color format. Please use a hex code like #FF0000.", ephemeral=True)
         return
 
-    # Define your command prefix
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=embed_color
+    )
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="playerinfo", description="Checks if a player is online in ERLC.")
+@app_commands.describe(player_name="The full name of the player to check")
+async def playerinfo_command(interaction: discord.Interaction, player_name: str):
+    await interaction.response.defer(ephemeral=True)
+
+    players_data = get_data("players")
+
+    if players_data is None:
+        await interaction.followup.send("Could not retrieve player data from ERLC API. Please try again later.", ephemeral=True)
+        return
+
+    found_player = None
+    for player in players_data:
+        full_player_name = player["Player"].split(":")[0]
+        if player_name.lower() == full_player_name.lower():
+            found_player = player
+            break
+    
+    if found_player:
+        player_id = found_player.get("Player").split(":")[1] if ":" in found_player.get("Player") else "N/A"
+        await interaction.followup.send(f"Player **{full_player_name}** is currently **online** (ID: `{player_id}`).", ephemeral=True)
+    else:
+        await interaction.followup.send(f"Player **{player_name}** is not currently online.", ephemeral=True)
+
+@bot.tree.command(name="serverinfo", description="Displays detailed information about the ERLC server.")
+async def serverinfo_command(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    server_data = get_data("server")
+    players_data = get_data("players")
+    queue_data = get_data("queue")
+
+    if server_data is None or players_data is None or queue_data is None:
+        await interaction.followup.send("Could not retrieve server information from ERLC API. Please try again later.")
+        return
+
+    embed = discord.Embed(
+        title=f"🚨 ERLC Server: {server_data.get('Name', 'N/A')} 🚨",
+        color=discord.Color.from_rgb(237, 29, 36)
+    )
+    embed.add_field(name="Owner", value=server_data.get('OwnerUsername', 'N/A'), inline=True)
+    embed.add_field(name="Current Players", value=f"`{len(players_data)}`", inline=True)
+    embed.add_field(name="Max Players", value=f"`{server_data.get('MaxPlayers', 'N/A')}`", inline=True)
+    embed.add_field(name="Players in Queue", value=f"`{len(queue_data)}`", inline=True)
+    embed.add_field(name="Join Key", value=f"`{server_data.get('JoinKey', 'N/A')}`", inline=True)
+    embed.add_field(name="Account Verified Required", value=server_data.get('AccVerifiedReq', 'N/A'), inline=True)
+    embed.set_footer(text="Data from ERLC API")
+    embed.timestamp = datetime.datetime.now()
+
+    await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="staffonline", description="Lists currently online staff members in ERLC.")
+async def staffonline_command(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    players_data = get_data("players")
+    staff_data = get_data("staff")
+
+    if players_data is None or staff_data is None:
+        await interaction.followup.send("Could not retrieve staff or player data from ERLC API. Please try again later.")
+        return
+
+    mod_names = set(staff_data.get("Mods", {}).values())
+    admin_names = set(staff_data.get("Admins", {}).values())
+    all_staff_names = mod_names.union(admin_names)
+
+    online_staff_list = []
+    for player in players_data:
+        player_name = player["Player"].split(":")[0]
+        if player_name in all_staff_names:
+            online_staff_list.append(player_name)
+    
+    if online_staff_list:
+        staff_message = "👮 **Online Staff:** " + ", ".join(online_staff_list)
+    else:
+        staff_message = "No staff members are currently online."
+    
+    await interaction.followup.send(staff_message)
+
+@bot.tree.command(name="teamcount", description="Shows a breakdown of players by team in ERLC.")
+async def teamcount_command(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    players_data = get_data("players")
+
+    if players_data is None:
+        await interaction.followup.send("Could not retrieve player data from ERLC API. Please try again later.")
+        return
+
+    team_counts = {}
+    for player in players_data:
+        team = player.get("Team", "Unknown Team")
+        team_counts[team] = team_counts.get(team, 0) + 1
+    
+    if team_counts:
+        team_message = "👥 **Player Count by Team:**\n"
+        for team, count in team_counts.items():
+            team_message += f"- {team}: `{count}`\n"
+    else:
+        team_message = "No players currently online to count by team."
+    
+    await interaction.followup.send(team_message)
+
+@bot.tree.command(name="vehicles", description="Lists all active vehicles in the ERLC server.")
+async def vehicles_command(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    vehicles_data = get_data("vehicles")
+
+    if vehicles_data is None:
+        await interaction.followup.send("Could not retrieve vehicle data from ERLC API. Please try again later.")
+        return
+
+    if vehicles_data:
+        vehicle_list = []
+        for vehicle in vehicles_data:
+            name = vehicle.get("Name", "Unnamed Vehicle")
+            owner = vehicle.get("Owner", "No Owner")
+            texture = vehicle.get("Texture")
+            
+            if texture and texture != "Default":
+                vehicle_list.append(f"- `{name}` (Owner: {owner}, Texture: {texture})")
+            else:
+                vehicle_list.append(f"- `{name}` (Owner: {owner})")
+        
+        vehicles_message = "🚗 **Active Vehicles:**\n" + "\n".join(vehicle_list[:10])
+        if len(vehicle_list) > 10:
+            vehicles_message += f"\n...and {len(vehicle_list) - 10} more."
+    else:
+        vehicles_message = "No active vehicles found in the server."
+    
+    await interaction.followup.send(vehicles_message)
+
+
+# Existing: on_message event handler for traditional prefix commands
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author == bot.user:
+        return
+
+    await bot.process_commands(message)
+
     prefix = "!"
 
-    # Check if the message starts with the prefix
     if message.content.startswith(prefix):
-        # Attempt to delete the user's command message
         try:
             await message.delete()
             print(f"Deleted command message from {message.author}: {message.content}")
@@ -189,25 +318,21 @@ async def on_message(message: discord.Message):
         except discord.HTTPException as e:
             print(f"Failed to delete message: {e}")
 
-        # Split the message into command and arguments
         parts = message.content[len(prefix):].split(' ', 1)
         command = parts[0].lower()
-        # args = parts[1] if len(parts) > 1 else "" # Not strictly needed for these commands
+        args = parts[1] if len(parts) > 1 else ""
 
-        if command == "debug": # New: !debug command
-            # This will print a message to the Render logs
+        if command == "debug":
             debug_message = f"DEBUG command received from {message.author} in #{message.channel.name}. Current time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"
             print(debug_message)
-            # Send debug info privately to the user
             try:
                 await message.author.send(f"Debug log message sent to Render console. Check the service logs! \n\n`{debug_message}`")
             except discord.Forbidden:
                 await message.channel.send(f"{message.author.mention}, I couldn't DM you. Debug info sent to console.", delete_after=10)
-        elif command == "update": # New: !update command
-            # This triggers an immediate update of the status message
+        elif command == "update":
             print(f"UPDATE command received from {message.author} in #{message.channel.name}. Triggering immediate status refresh.")
             
-            channel = client.get_channel(DISCORD_CHANNEL_ID)
+            channel = bot.get_channel(DISCORD_CHANNEL_ID)
             if not channel:
                 await message.author.send("Error: Could not find the designated status channel for update.")
                 return
@@ -216,9 +341,8 @@ async def on_message(message: discord.Message):
             status_msg = None
             view = JoinButtonView(url=JOIN_SERVER_URL)
 
-            # Find existing messages to edit (similar to update_status_loop)
             async for history_message in channel.history(limit=10):
-                if history_message.author == client.user:
+                if history_message.author == bot.user:
                     if history_message.embeds and not history_message.embeds[0].fields:
                         banner_msg = history_message
                     elif history_message.embeds and history_message.embeds[0].fields:
@@ -234,15 +358,51 @@ async def on_message(message: discord.Message):
                     status_msg = await channel.send(embed=new_status_embed, view=view)
                 else:
                     await status_msg.edit(embed=new_status_embed, view=view)
-                # Send confirmation privately to the user
                 await message.author.send("Session status updated successfully!")
             except discord.Forbidden:
                 await message.channel.send(f"{message.author.mention}, I couldn't DM you. Session status updated in channel.", delete_after=10)
             except Exception as e:
                 await message.author.send(f"Error updating status: {e}")
                 print(f"Error in !update command: {e}")
-        # You can add more elif statements for other commands here
-        # elif command == "anothercommand":
-        #     await message.channel.send("This is another command!")
+        elif command == "refresh":
+            print(f"REFRESH command received from {message.author} in #{message.channel.name}. Triggering full status refresh.")
+            
+            channel = bot.get_channel(DISCORD_CHANNEL_ID)
+            if not channel:
+                await message.author.send("Error: Could not find the designated status channel for refresh.")
+                return
 
-client.run(DISCORD_BOT_TOKEN)
+            # This will force the update_status_loop to re-find/re-send messages
+            # by temporarily setting banner_msg and status_msg to None.
+            # This is a bit of a hack but effective for a "full refresh".
+            # Accessing global variables directly in an async function can be tricky.
+            # It's better to make update_status_loop callable or reset its internal state.
+            # For simplicity for now, we'll try to force a re-send.
+            
+            # To truly force a re-send, we can call the update_status_loop logic directly
+            # after resetting the message pointers.
+            
+            # Temporarily clear the message pointers for the next update cycle
+            # This is a bit tricky with the current loop structure.
+            # A more robust solution would be to make update_status_loop accept arguments
+            # or have a separate function to clear the message IDs.
+            
+            # For now, we'll just try to force the send/edit logic again.
+            # The most reliable way to force a full re-send is to briefly stop and restart the loop,
+            # but that's more complex.
+            # A simpler approach for !refresh is to just send a new message.
+            
+            # Option 1: Send a new message (simpler for !refresh)
+            try:
+                new_banner_embed, new_status_embed = build_embeds()
+                await channel.send(embed=new_banner_embed)
+                await channel.send(embed=new_status_embed, view=view)
+                await message.author.send("Session status fully refreshed and re-posted successfully!")
+            except discord.Forbidden:
+                await message.channel.send(f"{message.author.mention}, I couldn't DM you. Session status fully refreshed in channel.", delete_after=10)
+            except Exception as e:
+                await message.author.send(f"Error during full refresh: {e}")
+                print(f"Error in !refresh command: {e}")
+
+
+bot.run(DISCORD_BOT_TOKEN)
