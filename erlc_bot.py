@@ -3,13 +3,14 @@ import discord
 import asyncio
 import time
 import os
-from aiohttp import web # New: Import aiohttp for the web server
+from aiohttp import web
+import datetime
 
 # --- CONFIGURATION ---
 DISCORD_BOT_TOKEN = os.environ['DISCORD_BOT_TOKEN']
 DISCORD_CHANNEL_ID = int(os.environ['DISCORD_CHANNEL_ID'])
 ERLC_API_KEY = os.environ['ERLC_API_KEY']
-JOIN_SERVER_URL = "https://policeroleplay.community/join/NSRPLive" # <-- IMPORTANT: Put your button link here
+JOIN_SERVER_URL = "https://policeroleplay.community/join/NSRPLive"
 
 # --- URLs for your images ---
 SESSIONS_BANNER_URL = "https://media.discordapp.net/attachments/1377899647993122842/1403170076307492985/image.png"
@@ -17,9 +18,10 @@ FOOTER_IMAGE_URL = "https://media.discordapp.net/attachments/1377899647993122842
 # ----------------------------------------------------
 
 intents = discord.Intents.default()
+intents.message_content = True
 client = discord.Client(intents=intents)
 
-# New: The web server to keep the port open
+# The web server to keep the port open
 async def handle(request):
     return web.Response(text="Bot is running!")
 
@@ -28,12 +30,16 @@ async def start_web_server():
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 8080)))
+    # Get the port from Render's environment variable, default to 8080 if not found
+    port = int(os.environ.get('PORT', 8080))
+    print(f"Attempting to start web server on 0.0.0.0:{port}") # NEW: Debugging print
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
+    print(f"Web server started successfully on port {port}") # NEW: Debugging print
 
 class JoinButtonView(discord.ui.View):
     def __init__(self, url):
-        super().__init__(timeout=None) # Timeout=None makes the button persistent
+        super().__init__(timeout=None)
         self.add_item(discord.ui.Button(label="Join Server", style=discord.ButtonStyle.link, url=url))
 
 def get_data(endpoint):
@@ -48,11 +54,9 @@ def get_data(endpoint):
     return None
 
 def build_embeds():
-    # --- Embed 1: The Banner ---
     banner_embed = discord.Embed(color=discord.Color.from_rgb(237, 29, 36))
     banner_embed.set_image(url=SESSIONS_BANNER_URL)
 
-    # --- Embed 2: The Status ---
     players = get_data("players") or []
     queue = get_data("queue") or []
     staff = get_data("staff") or {}
@@ -64,7 +68,7 @@ def build_embeds():
     mods_online = [p["Player"].split(":")[0] for p in players if p["Player"].split(":")[0] in all_mods]
 
     status_embed = discord.Embed(
-        description="A message will be posted here whenever we are currently hosting a session. Please do not join the server when it is offline, you will be kicked!\n\n**Sessions are hosted daily around <t:1672534800:t>!**",
+        description="A message will be posted here whenever we are currently hosting a session. Please do not join the server when it is offline, you will be kicked!\n\n**Sessions are hosted daily around 5:00 PM EST!**",
         color=discord.Color.from_rgb(237, 29, 36)
     )
 
@@ -90,13 +94,10 @@ async def update_status_loop():
     status_msg = None
     view = JoinButtonView(url=JOIN_SERVER_URL)
 
-    # Try to find previous messages to edit
     async for message in channel.history(limit=10):
         if message.author == client.user:
-            # The top message will have an embed with an image but no fields
             if message.embeds and not message.embeds[0].fields:
                 banner_msg = message
-            # The bottom message will have fields
             elif message.embeds and message.embeds[0].fields:
                 status_msg = message
         if banner_msg and status_msg:
@@ -106,20 +107,17 @@ async def update_status_loop():
         try:
             new_banner_embed, new_status_embed = build_embeds()
 
-            # If the banner doesn't exist, send it ONCE and then leave it alone.
             if banner_msg is None:
                 banner_msg = await channel.send(embed=new_banner_embed)
 
-            # Always edit the status message. If it doesn't exist, send it first.
             if status_msg is None:
                 status_msg = await channel.send(embed=new_status_embed, view=view)
             else:
                 await status_msg.edit(embed=new_status_embed, view=view)
 
-            await asyncio.sleep(60) 
+            await asyncio.sleep(60)
         except Exception as e:
-            print(f"An error occurred: {e}")
-            # Reset on error so it can try to find/resend the messages
+            print(f"An error occurred in update_status_loop: {e}")
             banner_msg = None
             status_msg = None
             await asyncio.sleep(60)
@@ -128,6 +126,49 @@ async def update_status_loop():
 async def on_ready():
     print(f"Bot is logged in as {client.user}")
     client.loop.create_task(update_status_loop())
-    client.loop.create_task(start_web_server()) # New: Start the web server
+    client.loop.create_task(start_web_server())
+
+@client.event
+async def on_message(message: discord.Message):
+    if message.author == client.user:
+        return
+
+    prefix = "!"
+
+    if message.content.startswith(prefix):
+        parts = message.content[len(prefix):].split(' ', 1)
+        command = parts[0].lower()
+        args = parts[1] if len(parts) > 1 else ""
+
+        if command == "hello":
+            await message.channel.send(f"Hello, {message.author.mention}!")
+        elif command == "status":
+            banner_embed, status_embed = build_embeds()
+            view = JoinButtonView(url=JOIN_SERVER_URL)
+            await message.channel.send(embeds=[banner_embed, status_embed], view=view)
+        elif command == "playerinfo":
+            if not args:
+                await message.channel.send("Please provide a player name. Usage: `!playerinfo [PlayerName]`")
+                return
+
+            player_name_query = args.strip()
+            players_data = get_data("players")
+
+            if players_data is None:
+                await message.channel.send("Could not retrieve player data from ERLC API. Please try again later.")
+                return
+
+            found_player = None
+            for player in players_data:
+                full_player_name = player["Player"].split(":")[0]
+                if player_name_query.lower() == full_player_name.lower():
+                    found_player = player
+                    break
+            
+            if found_player:
+                player_id = found_player.get("Player").split(":")[1] if ":" in found_player.get("Player") else "N/A"
+                await message.channel.send(f"Player **{full_player_name}** is currently **online** (ID: `{player_id}`).")
+            else:
+                await message.channel.send(f"Player **{player_name_query}** is not currently online.")
 
 client.run(DISCORD_BOT_TOKEN)
